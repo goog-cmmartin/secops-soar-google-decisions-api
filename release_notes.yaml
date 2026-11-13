@@ -1,0 +1,9 @@
+- description: "Initial v1.0 release of the GoogleDecisions SOAR integration powered by Gemini Decision 1 (gemini-decision-1). Includes 3-tier hybrid authentication (Gemini API Key, Workload Identity Federation with automatic GCP API Keys resolution, and scoped OAuth2), Evaluate Decisions action with multimodal support, Run SOC Decision Preset action with 5 bundled SecOps triage packs, and adaptive Dark/Light HTML widgets."
+  version: 1.0
+  item_name: "GoogleDecisions"
+  item_type: "Integration"
+  new: true
+  deprecated: false
+  regressive: false
+  removed: false
+  publish_time: "2026-11-12"
