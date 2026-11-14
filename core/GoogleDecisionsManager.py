@@ -28,6 +28,10 @@ DEFAULT_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/decisions"
 DEFAULT_MODEL = "gemini-decision-1"
 DEFAULT_PROJECT_ID = "sdl-preview-americas"
 INPUT_COST_PER_MILLION_USD = 0.10
+MAX_API_INPUT_TOKENS = 262144
+SAFE_API_TOKEN_BUDGET = 210000
+CHARS_PER_TOKEN_ESTIMATE = 3.0
+DEFAULT_MAX_INPUT_CHARS = 60000
 
 logger_default = logging.getLogger("GoogleDecisionsManager")
 
@@ -640,12 +644,21 @@ class GoogleDecisionsManager:
                             else silent_entry
                         )
                         if isinstance(silent_payload, dict):
+                            dets_found = list(silent_payload.get("detections_found") or [])
+                            rules_list = list(silent_payload.get("rules_triggered") or [])
+                            if not rules_list and dets_found:
+                                seen_r = []
+                                for d in dets_found[:50]:
+                                    rn = d.get("rule_name") if isinstance(d, dict) else None
+                                    if rn and rn not in seen_r:
+                                        seen_r.append(rn)
+                                rules_list = seen_r[:10]
                             context_obj["correlated_silent_detections"] = {
-                                "total_detections": silent_payload.get("total_detections"),
+                                "detections_count": silent_payload.get("detections_count", silent_payload.get("total_detections")),
                                 "silent_detections_count": silent_payload.get("silent_detections_count"),
-                                "alerting_detections_count": silent_payload.get("alerting_detections_count"),
-                                "total_udm_events": silent_payload.get("total_udm_events"),
-                                "rules_triggered": list(silent_payload.get("rules_triggered") or [])[:10],
+                                "has_silent_detections": silent_payload.get("has_silent_detections"),
+                                "events_count": silent_payload.get("events_count", silent_payload.get("total_udm_events")),
+                                "rules_triggered": rules_list[:10],
                             }
                     except Exception:
                         pass
@@ -764,8 +777,208 @@ class GoogleDecisionsManager:
         return blocks
 
     # =========================================================================
-    # API Execution & Result Post-Processing
+    # API Execution, Token-Budget Guardrails & Result Post-Processing
     # =========================================================================
+
+    @staticmethod
+    def _compact_json_obj(obj: Any, max_list_items: int = 5, max_str_len: int = 400, depth: int = 0) -> Tuple[Any, bool]:
+        """
+        Recursively compacts large arrays and oversized string fields inside JSON telemetry
+        (such as raw UDM events or detection dumps) while preserving all top-level summary metrics.
+        """
+        compacted = False
+        if depth > 6:
+            return "[...nested_depth_limit...]", True
+
+        if isinstance(obj, dict):
+            out: Dict[str, Any] = {}
+            bulky_array_keys = {
+                "udm_events",
+                "events",
+                "events_found",
+                "raw_events",
+                "detections",
+                "detections_found",
+                "silent_detections",
+                "alerting_detections",
+                "security_events",
+                "sample_events",
+                "evidence_attached",
+                "attached_evidences",
+                "entity_results",
+                "entities_scanned",
+                "entities_searched",
+                "related_cases",
+            }
+            for k, v in obj.items():
+                if k == "evidence_markdown" and isinstance(v, str) and len(v) > 1500:
+                    out[k] = v[:1500] + f"...[+{len(v) - 1500} chars]"
+                    compacted = True
+                    continue
+                if isinstance(v, list) and (k in bulky_array_keys or len(v) > max_list_items):
+                    orig_len = len(v)
+                    limit = 3 if k in ("udm_events", "events", "events_found", "raw_events", "detections", "detections_found", "attached_evidences") else max_list_items
+                    sliced = v[:limit]
+                    comp_items = []
+                    for item in sliced:
+                        c_item, c_flag = GoogleDecisionsManager._compact_json_obj(
+                            item, max_list_items=limit, max_str_len=max_str_len, depth=depth + 1
+                        )
+                        comp_items.append(c_item)
+                        compacted = compacted or c_flag
+                    out[k] = comp_items
+                    if orig_len > limit:
+                        out[f"_{k}_total_count"] = orig_len
+                        out[f"_{k}_truncated_items"] = orig_len - limit
+                        compacted = True
+                else:
+                    c_val, c_flag = GoogleDecisionsManager._compact_json_obj(
+                        v, max_list_items=max_list_items, max_str_len=max_str_len, depth=depth + 1
+                    )
+                    out[k] = c_val
+                    compacted = compacted or c_flag
+            return out, compacted
+
+        if isinstance(obj, list):
+            orig_len = len(obj)
+            sliced = obj[:max_list_items]
+            out_list = []
+            for item in sliced:
+                c_item, c_flag = GoogleDecisionsManager._compact_json_obj(
+                    item, max_list_items=max_list_items, max_str_len=max_str_len, depth=depth + 1
+                )
+                out_list.append(c_item)
+                compacted = compacted or c_flag
+            if orig_len > max_list_items:
+                out_list.append(f"[...{orig_len - max_list_items} additional items omitted...]")
+                compacted = True
+            return out_list, compacted
+
+        if isinstance(obj, str) and len(obj) > max_str_len:
+            return obj[:max_str_len] + f"...[+{len(obj) - max_str_len} chars]", True
+
+        return obj, False
+
+    @classmethod
+    def enforce_input_budget(
+        cls,
+        input_payload: Union[str, List[Dict[str, Any]]],
+        question_count: int = 1,
+        max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+    ) -> Tuple[Union[str, List[Dict[str, Any]]], Dict[str, Any]]:
+        """
+        Enforces a question-aware input size guardrail so `question_count * input_tokens`
+        never exceeds the Gemini Decisions API 262,144 token ceiling:
+          1. Compacts any large embedded JSON objects (e.g. raw `.JsonResult` dumps from upstream steps).
+          2. Applies 70% Head / 30% Tail truncation if the text still exceeds the safe character budget.
+        """
+        q_count = max(1, int(question_count or 1))
+        question_aware_ceiling = int((SAFE_API_TOKEN_BUDGET * CHARS_PER_TOKEN_ESTIMATE) / q_count)
+        if max_input_chars and int(max_input_chars) > 0:
+            effective_limit = min(int(max_input_chars), question_aware_ceiling)
+        else:
+            effective_limit = question_aware_ceiling
+        effective_limit = max(2000, effective_limit)
+
+        def _compact_and_bound_str(raw_text: str) -> Tuple[str, Dict[str, Any]]:
+            orig_len = len(raw_text)
+            text = raw_text
+            json_compacted = False
+            input_truncated = False
+
+            # Step 1: If text exceeds 12,000 chars or effective_limit, compact embedded JSON blobs first
+            if orig_len > min(12000, effective_limit):
+                decoder = json.JSONDecoder()
+                out_segments: List[str] = []
+                idx = 0
+                n = len(text)
+                while idx < n:
+                    brace_pos = text.find("{", idx)
+                    if brace_pos == -1:
+                        out_segments.append(text[idx:])
+                        break
+                    if brace_pos > idx:
+                        out_segments.append(text[idx:brace_pos])
+                    try:
+                        parsed_obj, end_idx = decoder.raw_decode(text, brace_pos)
+                        raw_span_len = end_idx - brace_pos
+                        if isinstance(parsed_obj, dict) and raw_span_len > 4000:
+                            comp_obj, did_compact = cls._compact_json_obj(parsed_obj)
+                            if did_compact:
+                                comp_str = json.dumps(comp_obj, indent=2, default=str)
+                                if len(comp_str) < raw_span_len:
+                                    out_segments.append(comp_str)
+                                    json_compacted = True
+                                    idx = end_idx
+                                    continue
+                        out_segments.append(text[brace_pos:end_idx])
+                        idx = end_idx
+                    except Exception:
+                        out_segments.append(text[brace_pos : brace_pos + 1])
+                        idx = brace_pos + 1
+                if json_compacted:
+                    text = "".join(out_segments)
+
+            # Step 2: Enforce hard character ceiling via 70% Head + 30% Tail split
+            if len(text) > effective_limit:
+                input_truncated = True
+                marker_budget = 140
+                usable = max(1000, effective_limit - marker_budget)
+                head_len = int(usable * 0.70)
+                tail_len = usable - head_len
+                omitted = len(text) - (head_len + tail_len)
+                marker = (
+                    f"\n\n[...TRUNCATED {omitted} CHARS TO FIT GEMINI-DECISION-1 "
+                    f"262,144 TOKEN BUDGET (QUESTIONS={q_count}, LIMIT={effective_limit} CHARS)...]\n\n"
+                )
+                text = text[:head_len] + marker + text[-tail_len:]
+
+            meta = {
+                "original_input_chars": orig_len,
+                "effective_input_chars": len(text),
+                "max_allowed_chars": effective_limit,
+                "question_count": q_count,
+                "json_compacted": json_compacted,
+                "input_truncated": input_truncated,
+            }
+            return text, meta
+
+        if isinstance(input_payload, str):
+            bounded_str, meta = _compact_and_bound_str(input_payload)
+            return bounded_str, meta
+
+        if isinstance(input_payload, list):
+            new_blocks: List[Dict[str, Any]] = []
+            agg_meta = {
+                "original_input_chars": 0,
+                "effective_input_chars": 0,
+                "max_allowed_chars": effective_limit,
+                "question_count": q_count,
+                "json_compacted": False,
+                "input_truncated": False,
+            }
+            for blk in input_payload:
+                if isinstance(blk, dict) and blk.get("type") == "text" and isinstance(blk.get("text"), str):
+                    b_text, b_meta = _compact_and_bound_str(blk["text"])
+                    new_blk = dict(blk)
+                    new_blk["text"] = b_text
+                    new_blocks.append(new_blk)
+                    agg_meta["original_input_chars"] += b_meta["original_input_chars"]
+                    agg_meta["effective_input_chars"] += b_meta["effective_input_chars"]
+                    agg_meta["json_compacted"] = agg_meta["json_compacted"] or b_meta["json_compacted"]
+                    agg_meta["input_truncated"] = agg_meta["input_truncated"] or b_meta["input_truncated"]
+                else:
+                    new_blocks.append(blk)
+            return new_blocks, agg_meta
+
+        return input_payload, {
+            "original_input_chars": 0,
+            "effective_input_chars": 0,
+            "max_allowed_chars": effective_limit,
+            "question_count": q_count,
+            "json_compacted": False,
+            "input_truncated": False,
+        }
 
     def evaluate_decisions(
         self,
@@ -773,18 +986,32 @@ class GoogleDecisionsManager:
         questions: Union[str, Dict[str, Any], List[Dict[str, Any]]],
         confidence_threshold: float = 0.80,
         preset_name: Optional[str] = None,
+        max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
     ) -> Dict[str, Any]:
         """
         Calls `POST /v1beta/decisions` using `gemini-decision-1` and returns a rich,
         SOAR-ready dictionary with calibrated answers, flattened playbook summary keys,
-        confidence gating flags, and token usage metrics.
+        confidence gating flags, input budget guardrail telemetry, and token usage metrics.
         """
         norm_questions = self.normalize_questions(questions)
         threshold = max(0.0, min(1.0, float(confidence_threshold)))
 
+        bounded_input, guardrail_meta = self.enforce_input_budget(
+            input_payload=input_payload,
+            question_count=len(norm_questions),
+            max_input_chars=max_input_chars,
+        )
+        if guardrail_meta.get("json_compacted") or guardrail_meta.get("input_truncated"):
+            self.logger.info(
+                f"Input budget guardrail active: compacted={guardrail_meta.get('json_compacted')}, "
+                f"truncated={guardrail_meta.get('input_truncated')} "
+                f"({guardrail_meta.get('original_input_chars')} -> {guardrail_meta.get('effective_input_chars')} chars "
+                f"across {len(norm_questions)} questions)."
+            )
+
         request_body = {
             "model": self.model_name,
-            "input": input_payload,
+            "input": bounded_input,
             "questions": norm_questions,
         }
 
@@ -798,6 +1025,28 @@ class GoogleDecisionsManager:
             timeout=60,
             verify=self.verify_ssl,
         )
+
+        # Automatic fallback retry if tokenizer density still exceeded 262,144 tokens
+        if resp.status_code == 400 and "exceeds the maximum number of tokens" in resp.text:
+            retry_limit = max(2000, int(guardrail_meta.get("effective_input_chars", 20000) * 0.40))
+            self.logger.warning(
+                f"Gemini Decisions API reported token limit exceeded; auto-retrying with reduced limit ({retry_limit} chars)."
+            )
+            bounded_input, guardrail_meta = self.enforce_input_budget(
+                input_payload=bounded_input,
+                question_count=len(norm_questions),
+                max_input_chars=retry_limit,
+            )
+            guardrail_meta["auto_retry_shrunk"] = True
+            request_body["input"] = bounded_input
+            resp = requests.post(
+                self.api_endpoint,
+                headers=headers,
+                json=request_body,
+                timeout=60,
+                verify=self.verify_ssl,
+            )
+
         latency_ms = int(round((time.time() - start_ts) * 1000))
 
         if resp.status_code != 200:
@@ -877,6 +1126,7 @@ class GoogleDecisionsManager:
             "summary": summary,
             "questions_metadata": norm_questions,
             "answers": answers,
+            "input_guardrail": guardrail_meta,
             "usage": {
                 "total_input_tokens": total_input_tokens,
                 "total_output_tokens": total_output_tokens,
@@ -892,6 +1142,7 @@ class GoogleDecisionsManager:
         input_payload: Union[str, List[Dict[str, Any]]],
         additional_questions: Optional[Union[str, Dict[str, Any]]] = None,
         confidence_threshold: float = 0.80,
+        max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
     ) -> Dict[str, Any]:
         """
         Loads a bundled SOC Decision Preset, optionally merges custom questions,
@@ -916,6 +1167,7 @@ class GoogleDecisionsManager:
             questions=questions_map,
             confidence_threshold=confidence_threshold,
             preset_name=canonical_name,
+            max_input_chars=max_input_chars,
         )
 
     def test_connection(self) -> bool:

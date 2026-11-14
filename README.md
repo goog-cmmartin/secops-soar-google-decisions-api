@@ -82,6 +82,7 @@ Executes one of 5 pre-built SOC decision batteries against the current SOAR Case
 | `Additional Context or Telemetry` | String | — | Optional enrichment results, silent detection summaries, or command lines to append to the context. |
 | `Custom Questions Override (JSON)` | String | — | Optional JSON object of additional/override questions merged into the preset. |
 | `Confidence Threshold` | String | `0.80` | Minimum top-choice probability (`0.0`–`1.0`) required to mark `auto_action_ready = true`. |
+| `Max Input Characters` | String | `60000` | Maximum character budget for the shared input context before smart JSON compaction and 70/30 head+tail truncation are applied to stay safely below the 262,144 token limit. |
 | `Post Case Wall Summary` | Boolean | `true` | Post a formatted Markdown decision scorecard table to the SOAR Case Wall. |
 
 ---

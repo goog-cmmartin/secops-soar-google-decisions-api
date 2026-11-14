@@ -40,6 +40,13 @@ def _parse_float(val, default: float = 0.80) -> float:
         return default
 
 
+def _parse_int(val, default: int = 60000) -> int:
+    try:
+        return int(float(str(val).strip()))
+    except (ValueError, TypeError):
+        return default
+
+
 @output_handler
 def main():
     siemplify = SiemplifyAction()
@@ -109,6 +116,12 @@ def main():
             ),
             default=0.80,
         )
+        max_input_chars = _parse_int(
+            siemplify.extract_action_param(
+                "Max Input Characters", default_value="60000", print_value=True
+            ),
+            default=60000,
+        )
 
         manager = GoogleDecisionsManager(
             api_key=api_key,
@@ -175,6 +188,7 @@ def main():
             input_payload=input_payload,
             additional_questions=extra_questions_json,
             confidence_threshold=confidence_threshold,
+            max_input_chars=max_input_chars,
         )
         decision_result["case_id"] = case_id_str
 

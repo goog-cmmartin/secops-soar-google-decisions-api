@@ -213,3 +213,37 @@ def test_evaluate_decisions_confidence_gating_and_summary(mock_post):
     assert result["summary"]["sev_level"] == 3
     assert result["summary"]["sev_label"] == "High"
     assert result["usage"]["total_output_tokens"] == 0
+
+
+def test_enforce_input_budget_compacts_bulky_json_and_truncates():
+    bulky_payload = {
+        "total_detections": 420,
+        "silent_detections_count": 418,
+        "rules_triggered": ["ru_1", "ru_2"],
+        "udm_events": [{"event_id": f"ev_{i}", "raw_log": "A" * 1200} for i in range(250)],
+    }
+    raw_text = f"Case #109430 Telemetry:\n{json.dumps(bulky_payload)}"
+    assert len(raw_text) > 250000
+
+    bounded_text, meta = GoogleDecisionsManager.enforce_input_budget(
+        input_payload=raw_text,
+        question_count=6,
+        max_input_chars=60000,
+    )
+    assert meta["json_compacted"] is True
+    assert len(bounded_text) <= 60000
+    assert "total_detections" in bounded_text
+    assert "_udm_events_total_count" in bounded_text
+
+    # Test hard head+tail truncation when non-JSON string exceeds limit
+    plain_oversized = "HEAD_MARKER_" + ("X" * 80000) + "_TAIL_MARKER"
+    trunc_text, trunc_meta = GoogleDecisionsManager.enforce_input_budget(
+        input_payload=plain_oversized,
+        question_count=6,
+        max_input_chars=10000,
+    )
+    assert trunc_meta["input_truncated"] is True
+    assert len(trunc_text) <= 10000
+    assert trunc_text.startswith("HEAD_MARKER_")
+    assert trunc_text.endswith("_TAIL_MARKER")
+    assert "TRUNCATED" in trunc_text

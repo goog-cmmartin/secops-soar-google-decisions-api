@@ -43,3 +43,8 @@ parameters:
   is_mandatory: false
   name: Confidence Threshold
   type: string
+- default_value: '60000'
+  description: Maximum character budget for the shared input context before smart JSON telemetry compaction and head/tail truncation are applied to stay safely within the 262,144 token limit.
+  is_mandatory: false
+  name: Max Input Characters
+  type: string
