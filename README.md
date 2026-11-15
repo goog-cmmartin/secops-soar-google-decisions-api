@@ -108,12 +108,12 @@ Evaluates an arbitrary user-defined JSON schema of `noul` (boolean), `multiple_c
 
 ## Playbook Patterns & JSON Result Placeholders
 
-Every execution returns a structured `JsonResult` engineered for deterministic SOAR `IfFlowCondition` playbook branches:
+Every execution returns a structured `JsonResult` engineered for deterministic SOAR `IfFlowCondition` playbook branches (using Chronicle SOAR's pipe JSON-path syntax):
 
-- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult.summary.auto_action_ready]` (`true` / `false`)
-- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult.summary.min_confidence]` (e.g., `0.831`)
-- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult.top_decisions.<question_key>]` (e.g., `true`, `false`, or selected choice key)
-- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult.top_confidences.<question_key>]` (e.g., `0.942`)
+- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult| "all_confident"]` (`true` / `false`)
+- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult| "escalation_required"]` (`true` / `false`)
+- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult| "summary.<question_key>"]` (e.g., `true`, `false`, or selected choice key)
+- `[GoogleDecisions_Run SOC Decision Preset_1.JsonResult| "summary.<question_key>_confidence"]` (e.g., `0.942`)
 
 ### Example Playbook Use Cases
 1. **Smart Compute & Latency Gate Ahead of Multi-Turn AI Agents (`GoogleADK`)**:
