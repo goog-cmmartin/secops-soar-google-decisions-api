@@ -6,7 +6,7 @@ categories:
   - "Artificial Intelligence"
   - "Security Operations"
 author: "Christopher Martin"
-version: 1.3
+version: 1.4
 python_version: "3.11"
 is_custom: true
 svg_logo_path: resources/logo.svg
@@ -36,7 +36,7 @@ parameters:
     integration_identifier: GoogleDecisions
     is_mandatory: false
     type: string
-    default_value: "sdl-preview-americas"
+    default_value: ""
   - name: "Model Name"
     description: "Default Gemini Decision model identifier."
     integration_identifier: GoogleDecisions
@@ -78,7 +78,7 @@ configuration:
     description: "Google Cloud Project ID used for WIF quota project headers and automatic Gemini API Key resolution via apikeys.googleapis.com."
     type: string
     is_mandatory: false
-    default_value: "sdl-preview-americas"
+    default_value: ""
   - name: "Model Name"
     description: "Default Gemini Decision model identifier."
     type: string

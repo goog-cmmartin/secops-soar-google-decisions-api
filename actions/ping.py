@@ -50,7 +50,7 @@ def main():
             INTEGRATION_NAME, "Service Account JSON", default_value="", print_value=False
         )
         project_id = siemplify.extract_configuration_param(
-            INTEGRATION_NAME, "GCP Project ID", default_value="sdl-preview-americas", print_value=True
+            INTEGRATION_NAME, "GCP Project ID", default_value="", print_value=True
         )
         model_name = (
             siemplify.extract_action_param("Model Name", default_value=None)

@@ -26,7 +26,7 @@ import requests
 
 DEFAULT_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/decisions"
 DEFAULT_MODEL = "gemini-decision-1"
-DEFAULT_PROJECT_ID = "sdl-preview-americas"
+DEFAULT_PROJECT_ID = ""
 INPUT_COST_PER_MILLION_USD = 0.10
 MAX_API_INPUT_TOKENS = 262144
 SAFE_API_TOKEN_BUDGET = 210000
@@ -217,9 +217,11 @@ class GoogleDecisionsManager:
                 from google.auth import impersonated_credentials
                 import google.auth.transport.requests
 
-                source_creds, _ = google.auth.default(
+                source_creds, default_proj = google.auth.default(
                     scopes=["https://www.googleapis.com/auth/cloud-platform"]
                 )
+                if not self.project_id and default_proj:
+                    self.project_id = default_proj
                 target_creds = impersonated_credentials.Credentials(
                     source_credentials=source_creds,
                     target_principal=self.workload_identity_email,
@@ -264,7 +266,9 @@ class GoogleDecisionsManager:
             import google.auth
             import google.auth.transport.requests
 
-            creds, _ = google.auth.default(scopes=scopes)
+            creds, default_proj = google.auth.default(scopes=scopes)
+            if not self.project_id and default_proj:
+                self.project_id = default_proj
             if not creds.valid:
                 creds.refresh(google.auth.transport.requests.Request())
             if getattr(creds, "token", None):

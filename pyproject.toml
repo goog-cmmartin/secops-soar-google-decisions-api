@@ -1,6 +1,6 @@
 [project]
 name = "soar-integration-google-decisions"
-version = "1.3"
+version = "1.4"
 description = "Google Gemini Decisions API (gemini-decision-1) Integration for Google SecOps SOAR"
 readme = "README.md"
 requires-python = ">=3.11"
